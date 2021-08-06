@@ -93,7 +93,6 @@ from .utils import (
     mask_to_coloured_slices,
 )
 
-
 _assigned_scene_ids = {}  # id(volume) -> str
 
 
@@ -137,6 +136,7 @@ class VolumeSlicer:
         self,
         app,
         volume,
+        load_volume,
         *,
         spacing=None,
         origin=None,
@@ -147,7 +147,7 @@ class VolumeSlicer:
         color=None,
         thumbnail=True,
     ):
-
+        self._load_volume = load_volume
         if not isinstance(app, dash.Dash):
             raise TypeError("Expect first arg to be a Dash app.")
         self._app = app
@@ -155,11 +155,11 @@ class VolumeSlicer:
         # Check and store volume
         if not (isinstance(volume, np.ndarray) and volume.ndim == 3):
             raise TypeError("Expected volume to be a 3D numpy array")
-        self._volume = volume
-        spacing = (1, 1, 1) if spacing is None else spacing
-        spacing = float(spacing[0]), float(spacing[1]), float(spacing[2])
-        origin = (0, 0, 0) if origin is None else origin
-        origin = float(origin[0]), float(origin[1]), float(origin[2])
+        # self._volume = volume
+        self._spacing = (1, 1, 1) if spacing is None else spacing
+        self._spacing = float(self._spacing[0]), float(self._spacing[1]), float(self._spacing[2])
+        self._origin = (0, 0, 0) if origin is None else origin
+        self._origin = float(self._origin[0]), float(self._origin[1]), float(self._origin[2])
 
         # Check and store axis
         if not (isinstance(axis, int) and 0 <= axis <= 2):
@@ -169,7 +169,7 @@ class VolumeSlicer:
 
         # Check and store contrast limits
         if clim is None:
-            self._initial_clim = self._volume.min(), self._volume.max()
+            self._initial_clim = volume.min(), volume.max()
         elif isinstance(clim, (tuple, list)) and len(clim) == 2:
             self._initial_clim = float(clim[0]), float(clim[1])
         else:
@@ -200,8 +200,7 @@ class VolumeSlicer:
         self._scene_id = scene_id
 
         # Check color
-        if color is None:
-            color = discrete_colors[self._axis]
+        self._color = discrete_colors[self._axis] if color is None else color
 
         # Get unique id scoped to this slicer object
         VolumeSlicer._global_slicer_counter += 1
@@ -211,14 +210,7 @@ class VolumeSlicer:
         # Note that shape, origin and spacing are in zyx order.
         # The size, offset, stepsize are in xyz local to the slicer
         # (z is in direction of the axis).
-        self._slice_info = {
-            "axis": self._axis,
-            "size": shape3d_to_size2d(volume.shape, axis),
-            "offset": shape3d_to_size2d(origin, axis),
-            "stepsize": shape3d_to_size2d(spacing, axis),
-            "color": color,
-            "infoid": np.random.randint(1, 9999999),
-        }
+        self._slice_info = self._calculate_slice_info(volume)
 
         # Also store thumbnail size. The get_thumbnail_size() is a bit like
         # a simulation to get the low-res size.
@@ -246,10 +238,9 @@ class VolumeSlicer:
         """The axis to slice."""
         return self._axis
 
-    @property
-    def nslices(self) -> int:
+    def nslices(self, volume) -> int:
         """The number of slices for this slicer."""
-        return self._volume.shape[self._axis]
+        return volume.shape[self._axis]
 
     @property
     def graph(self):
@@ -319,17 +310,17 @@ class VolumeSlicer:
         """
         return self._overlay_data
 
-    def create_overlay_data(self, mask, color=None):
+    def create_overlay_data(self, volume, mask, color=None):
         """Given a 3D mask array, create an object that can be used as
         output for `slicer.overlay_data`. Set mask to `None` to clear the mask.
         The color can be a hex color or an rgb/rgba tuple. Alternatively,
         color can be a list of such colors, defining a colormap.
         """
         if mask is None:
-            return [None for index in range(self.nslices)]  # A reset
-        elif mask.shape != self._volume.shape:
+            return [None for index in range(self.nslices(volume))]  # A reset
+        elif mask.shape != volume.shape:
             raise ValueError(
-                f"Overlay must has shape {mask.shape}, but expected {self._volume.shape}"
+                f"Overlay must has shape {mask.shape}, but expected {volume.shape}"
             )
         return mask_to_coloured_slices(mask, self._axis, color)
 
@@ -350,12 +341,12 @@ class VolumeSlicer:
             assert not kwargs
             return self._context_id + "-" + name
 
-    def _slice(self, index, clim):
+    def _slice(self, volume, index, clim):
         """Sample a slice from the volume."""
         # Sample from the volume
         indices = [slice(None), slice(None), slice(None)]
         indices[self._axis] = index
-        im = self._volume[tuple(indices)].astype(np.float32)
+        im = volume[tuple(indices)].astype(np.float32)
         # Apply contrast limits
         clim = min(clim), max(clim)
         im = (im - clim[0]) * (255 / (clim[1] - clim[0]))
@@ -415,6 +406,8 @@ class VolumeSlicer:
         # A dict of static info for this slicer
         self._info = Store(id=self._subid("info"), data=info)
 
+        self.volume_path = Store(id=self._subid("volume-path"), data=[])
+
         # A tuple representing the contrast limits
         self._clim = Store(id=self._subid("clim"), data=self._initial_clim)
 
@@ -447,6 +440,12 @@ class VolumeSlicer:
         # Signal to set the position of other slicers with the same scene_id.
         self._setpos = Store(id=self._subid("setpos", True), data=None)
 
+        self._reset_pos = Store(id={
+            "context": f"{self._context_id}-resetpos",
+            "scene": self._scene_id,
+            "name": "setpos",
+        }, data=None)
+
         self._stores = [
             self._info,
             self._clim,
@@ -459,20 +458,60 @@ class VolumeSlicer:
             self._timer,
             self._state,
             self._setpos,
+            self._reset_pos,
+            self.volume_path,
         ]
+
+    def _calculate_clim(self, volume):
+        return volume.min(), volume.max()
+
+    def _calculate_slice_info(self, volume):
+        axis = self._axis
+        return {
+            "axis": axis,
+            "size": shape3d_to_size2d(volume.shape, axis),
+            "offset": shape3d_to_size2d(self._origin, axis),
+            "stepsize": shape3d_to_size2d(self._spacing, axis),
+            "color": self._color,
+            "infoid": np.random.randint(1, 9999999),
+        }
 
     def _create_server_callbacks(self):
         """Create the callbacks that run server-side."""
         app = self._app
 
         @app.callback(
-            Output(self._thumbs_data.id, "data"),
-            [Input(self._clim.id, "data")],
+            [
+                Output(self._clim.id, "data"),
+                Output(self._info.id, "data"),
+                Output(self._slider.id, "max"),
+                Output(self._reset_pos.id, "data")
+            ],
+            Input(self.volume_path.id, "data"),
         )
-        def upload_thumbnails(clim):
+        def load_volume(volume_path):
+            volume = self._load_volume(volume_path)
+            clim = self._calculate_clim(volume)
+            slice_info = self._calculate_slice_info(volume)
+            max_slider_value = slice_info["size"][2] - 1
+
+            return (
+                clim,
+                slice_info,
+                max_slider_value,
+                (0, 0, 0)
+            )
+
+        @app.callback(
+            Output(self._thumbs_data.id, "data"),
+            Input(self._clim.id, "data"),
+            State(self.volume_path.id, "data"),
+        )
+        def upload_thumbnails(clim, volume_path):
+            volume = self._load_volume(volume_path)
             return [
-                img_array_to_uri(self._slice(i, clim), self._thumbnail_param)
-                for i in range(self.nslices)
+                img_array_to_uri(self._slice(volume, i, clim), self._thumbnail_param)
+                for i in range(self.nslices(volume))
             ]
 
         if self._thumbnail_param is not None:
@@ -482,12 +521,14 @@ class VolumeSlicer:
             @app.callback(
                 Output(self._server_data.id, "data"),
                 [Input(self._state.id, "data"), Input(self._clim.id, "data")],
+                State(self.volume_path.id, "data"),
             )
-            def upload_requested_slice(state, clim):
+            def upload_requested_slice(state, clim, volume_path):
                 if state is None or not state["index_changed"]:
                     return dash.no_update
                 index = state["index"]
-                slice = img_array_to_uri(self._slice(index, clim))
+                volume = self._load_volume(volume_path)
+                slice = img_array_to_uri(self._slice(volume, index, clim))
                 return {"index": index, "slice": slice}
 
     def _create_client_callbacks(self):
