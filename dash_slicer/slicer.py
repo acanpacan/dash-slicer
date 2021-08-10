@@ -212,15 +212,6 @@ class VolumeSlicer:
         # (z is in direction of the axis).
         self._slice_info = self._calculate_slice_info(volume)
 
-        # Also store thumbnail size. The get_thumbnail_size() is a bit like
-        # a simulation to get the low-res size.
-        if self._thumbnail_param is None:
-            self._slice_info["thumbnail_size"] = self._slice_info["size"][:2]
-        else:
-            self._slice_info["thumbnail_size"] = get_thumbnail_size(
-                self._slice_info["size"][:2], self._thumbnail_param
-            )
-
         # Build the slicer
         self._create_dash_components()
         self._create_server_callbacks()
@@ -467,7 +458,7 @@ class VolumeSlicer:
 
     def _calculate_slice_info(self, volume):
         axis = self._axis
-        return {
+        slice_info = {
             "axis": axis,
             "size": shape3d_to_size2d(volume.shape, axis),
             "offset": shape3d_to_size2d(self._origin, axis),
@@ -475,6 +466,17 @@ class VolumeSlicer:
             "color": self._color,
             "infoid": np.random.randint(1, 9999999),
         }
+        # Also store thumbnail size. The get_thumbnail_size() is a bit like
+        # a simulation to get the low-res size.
+        if self._thumbnail_param is None:
+            slice_info["thumbnail_size"] = slice_info["size"][:2]
+        else:
+            slice_info["thumbnail_size"] = get_thumbnail_size(
+                slice_info["size"][:2], self._thumbnail_param
+            )
+
+        return slice_info
+
 
     def _create_server_callbacks(self):
         """Create the callbacks that run server-side."""
