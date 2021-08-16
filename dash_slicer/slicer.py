@@ -566,8 +566,7 @@ class VolumeSlicer:
             if (data && data.points && data.points.length) {
                 let point = data["points"][0];
                 let xyz = [point["x"], point["y"]];
-                let depth = info.offset[2] + index * info.stepsize[2];
-                xyz.splice(2 - info.axis, 0, depth);
+                xyz.splice(2 - info.axis, 0, null);
                 return xyz;
             }
             return dash_clientside.no_update;
